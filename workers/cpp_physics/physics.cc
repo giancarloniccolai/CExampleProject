@@ -3,6 +3,7 @@
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <sstream>
 #include <thread>
 
 #include <improbable/view.h>
@@ -22,7 +23,7 @@ using ComponentRegistry =
                    improbable::restricted::Partition>;
 
 const int kErrorExitStatus = 1;
-const std::uint32_t kOpListTimeoutMs = 100;
+const std::uint32_t kOpListTimeoutMs = 0;
 
 int main(int argc, char** argv) {
   auto print_usage = [&]() {
@@ -41,9 +42,11 @@ int main(int argc, char** argv) {
     return kErrorExitStatus;
   }
 
-  worker::EntityId entityId = 1;
+  std::vector<worker::EntityId> entityIdList = {1, 101, 102};
   worker::EntityId physicsPartitionId = 2;
   worker::EntityId clientPartitionId = 3;
+  worker::EntityId clientPartitionId2 = 10;
+  worker::EntityId clientPartitionId3 = 11;
 
   worker::ConnectionParameters parameters;
   parameters.WorkerType = "physics";
@@ -101,44 +104,73 @@ int main(int argc, char** argv) {
   });
   view.OnCommandRequest<sample::Login::Commands::TakeControl>(
       [&](const worker::CommandRequestOp<sample::Login::Commands::TakeControl>& op) {
+        decltype(clientPartitionId) partId;
+        switch(op.EntityId) {
+          case 1: partId = clientPartitionId; break;
+          case 101: partId = clientPartitionId2; break;
+          case 102: partId = clientPartitionId3; break;
+          default:
+            partId = clientPartitionId;
+        }
         connection.SendLogMessage(worker::LogLevel::kInfo, "Physics",
-                                  "Assigning the client partition to worker with ID " +
+                                  "Assigning the client partition for entity " 
+                                  + std::to_string(op.EntityId) + " partition "
+                                  + std::to_string(partId)
+                                  + " to worker with ID " +
                                       std::to_string(op.CallerWorkerEntityId));
         connection.SendCommandRequest<AssignPartitionCommand>(op.CallerWorkerEntityId,
-                                                              {clientPartitionId},
+                                                              {partId},
                                                               /* default timeout */ {});
       });
   view.OnCommandResponse<sample::ClientData::Commands::TestCommand>(
-      [&](const worker::CommandResponseOp<sample::ClientData::Commands::TestCommand>& op) {
-        if (op.StatusCode == worker::StatusCode::kSuccess) {
+      [&](const worker::CommandResponseOp<sample::ClientData::Commands::TestCommand>& ) {
+        /*if (op.StatusCode == worker::StatusCode::kSuccess) {
           connection.SendLogMessage(
               worker::LogLevel::kInfo, "Physics",
               "Received command response: " + std::to_string(op.Response->sum()));
-        }
+        }*/
       });
 
   int tick_count = 0;
   double angle = 0.0;
+  auto start_time = std::chrono::steady_clock::now();
   while (is_connected) {
     view.Process(connection.GetOpList(kOpListTimeoutMs));
 
-    // Update position of entity.
-    if (view.GetAuthority<sample::PhysicsSimulationSet>(entityId) ==
-        worker::Authority::kAuthoritative) {
-      angle += 0.5;
-      improbable::Position::Update position_update;
-      position_update.set_coords({std::sin(angle) * 100.0, 0.0, std::cos(angle) * 100.0});
-      connection.SendComponentUpdate<improbable::Position>(entityId, position_update);
-    }
+    for(const auto& entityId: entityIdList) { 
+      // Update position of entity.
+      if (view.GetAuthority<sample::PhysicsSimulationSet>(entityId) ==
+          worker::Authority::kAuthoritative) {
+        angle += 0.5;
+        improbable::Position::Update position_update;
+        position_update.set_coords({std::sin(angle) * 100.0, 0.0, std::cos(angle) * 100.0});
+        connection.SendComponentUpdate<improbable::Position>(entityId, position_update);
+      }
 
-    // Sleep for some time.
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // Send a command every 2 ticks.
-    if (tick_count++ % 2 == 0) {
-      connection.SendCommandRequest<sample::ClientData::Commands::TestCommand>(entityId, {10, 1.5f},
-                                                                               {});
+      // Send a command every 2 ticks.
+      if (tick_count++ % 2 == 0) {
+        connection.SendCommandRequest<sample::ClientData::Commands::TestCommand>(entityId, {10, 1.5f},
+                                                                                {});
+        tick_count++;                                                                        
+      }
+      tick_count++;
     }
+    
+    if(tick_count >= 1000000) {
+      double diff = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start_time).count()*1e-6;
+
+      std::ostringstream os;
+      os << "Sent " << tick_count << " messages in " << diff << " seconds";
+      if(diff > 0.0) {
+        os << "(" << tick_count / diff << " msg/seconds)";
+      } 
+      connection.SendLogMessage(
+            worker::LogLevel::kInfo, "Physics", os.str() );
+      //std::cerr << os.str() << "\n";
+      start_time = std::chrono::steady_clock::now();
+      tick_count = 0;
+    }
+                                                                            
   }
 
   return kErrorExitStatus;
